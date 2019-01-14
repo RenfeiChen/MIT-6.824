@@ -1,7 +1,11 @@
 package mapreduce
 
 import (
+	"encoding/json"
 	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"os"
 )
 
 func doMap(
@@ -53,6 +57,50 @@ func doMap(
 	//
 	// Your code here (Part I).
 	//
+
+	// Read the input files
+
+	contents, err := ioutil.ReadFile(inFile)
+	if err != nil {
+		log.Printf("There is no %s in the local file", inFile)
+	}
+
+	// Get the KV pairs by calling the mapF function
+
+	kvPairs := mapF(inFile, string(contents))
+
+	// Create all intermediate files and json encoders
+
+	files := make([]os.File, nReduce)
+	encoders := make([]json.Encoder, nReduce)
+
+	for i := 0; i < nReduce; i++ {
+		file, err := os.Create(reduceName(jobName, mapTask, i))
+		if err != nil {
+			log.Printf("Cannot create intermediate file %s", reduceName(jobName, mapTask, i))
+		}
+		files[i] = *file
+		encoders[i] = *json.NewEncoder(file)
+	}
+
+	// Partition mapF's output and encode them into nReduce intermediate files
+
+	for _, kv := range kvPairs {
+		r := ihash(kv.Key) % nReduce
+		err := encoders[r].Encode(&kv)
+		if err != nil {
+			log.Printf("Encode %v key/value pair failed", kv)
+		}
+	}
+
+	// Close the intermediate files
+
+	for i := 0; i < nReduce; i++ {
+		err := files[i].Close()
+		if err != nil {
+			log.Printf("Close the intermediate file %s failed", reduceName(jobName, mapTask, i))
+		}
+	}
 }
 
 func ihash(s string) int {
