@@ -44,11 +44,23 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// sure when we insert a task number into the channel there will be a
 	// receriver to receive this task concurrently
 
+	// IMPORTANT!!
+	// We can't put the workChan outside of this goroutine like putting it in
+	// the main function, since if we do that, when we have finished the for
+	// loop of the taskNumberChan, we will close the taskNumberChan, and if
+	// there are some error works, and we will return them but it has been
+	// closed, it wll get error
+
 	taskNumberChan := make(chan int)
 	go func() {
 		for i := 0; i < ntasks; i++ {
 			taskNumberChan <- i
 		}
+		// wait all the tasks to be done
+		for i := 0; i < ntasks; i++ {
+			<-workChan
+		}
+		// when all tasks have been done, we can close the taskNumberChan
 		close(taskNumberChan)
 	}()
 
@@ -81,11 +93,6 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				taskNumberChan <- task.TaskNumber
 			}
 		}(jobName, i, n_other, phase)
-	}
-
-	// wait all the tasks to be done
-	for i := 0; i < ntasks; i++ {
-		<-workChan
 	}
 
 	fmt.Printf("Schedule: %v done\n", phase)
