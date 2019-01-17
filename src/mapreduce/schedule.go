@@ -34,6 +34,8 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// Your code here (Part III, Part IV).
 	//
 
+	// WaitGroup to check if all tasks have been done
+
 	var wg sync.WaitGroup
 	wg.Add(ntasks)
 
@@ -76,6 +78,12 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			if call(worker, "Worker.DoTask", task, nil) {
 				// if the worker is available we should let the wg minus 1 and
 				// return the worker to the register channel
+
+				// IMPORTANT!!
+				// Need to write wg.Done() earlier than returning the worker
+				// Reason is that when MR finishes the phase, it will close the
+				// registerChan, so it will get dead lock since we cannot
+				// put the worker into the registerChan it it has been closed
 				wg.Done()
 				registerChan <- worker
 			} else {
