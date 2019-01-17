@@ -66,15 +66,15 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// Schedule all tasks to works
 
 	for i := range taskNumberChan {
-		// declare the taskArgs
-		task := DoTaskArgs{JobName: jobName, TaskNumber: i, NumOtherPhase: n_other, Phase: phase}
-		if phase == mapPhase {
-			task.File = mapFiles[i]
-		}
-		// get the free worker
-		worker := <-registerChan
-		// schedule the task to the worker
-		go func(task DoTaskArgs, worker string) {
+		// create a goroutine to handle the i task
+		go func(jobName string, i int, n_other int, phase jobPhase) {
+			task := DoTaskArgs{JobName: jobName, TaskNumber: i, NumOtherPhase: n_other, Phase: phase}
+			if phase == mapPhase {
+				task.File = mapFiles[i]
+			}
+			// get the free worker
+			worker := <-registerChan
+			// schedule the task to the worker
 			if call(worker, "Worker.DoTask", task, nil) {
 				// if the worker is available we should let the wg minus 1 and
 				// return the worker to the register channel
@@ -91,7 +91,7 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 				// number so we need to return the number to the taskNumberChan
 				taskNumberChan <- task.TaskNumber
 			}
-		}(task, worker)
+		}(jobName, i, n_other, phase)
 	}
 
 	wg.Wait()
