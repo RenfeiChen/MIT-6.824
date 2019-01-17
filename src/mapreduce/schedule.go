@@ -2,7 +2,6 @@ package mapreduce
 
 import (
 	"fmt"
-	"sync"
 )
 
 //
@@ -34,32 +33,22 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 	// Your code here (Part III, Part IV).
 	//
 
-	// WaitGroup to check if all tasks have been done
+	// workChan to check if all the tasks have been done
 
-	var wg sync.WaitGroup
-	wg.Add(ntasks)
+	workChan := make(chan int)
 
-	// Add all task numbers to taskNumber channel and use waitgroup to wait
+	// Add all task numbers to taskNumber channel and use workChan to wait
 	// all tasks to get completed, remmmember to close the channel or we cannot
 	// use the range since it wll get dead lock, the receiver doesn't know if
 	// it has ended the reason why we use a new goroutine is that we can make
 	// sure when we insert a task number into the channel there will be a
 	// receriver to receive this task concurrently
 
-	// ##Important
-	// We need to use wg.Wait() earlier than closing the channel
-	// Or we can use the wg.Wait() in the main function
-	// The reason is that if we put close ealier than wait, after receiving all
-	// taskNumber, the i loop in the main function will end, no matter if there
-	// is any running goroutine, the main function will end, so the gorouinte
-	// will get terminated, and the task cannot be done
-
 	taskNumberChan := make(chan int)
 	go func() {
 		for i := 0; i < ntasks; i++ {
 			taskNumberChan <- i
 		}
-		//wg.Wait()
 		close(taskNumberChan)
 	}()
 
@@ -76,16 +65,16 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 			worker := <-registerChan
 			// schedule the task to the worker
 			if call(worker, "Worker.DoTask", task, nil) {
-				// if the worker is available we should let the wg minus 1 and
-				// return the worker to the register channel
-
 				// IMPORTANT!!
-				// Need to write wg.Done() earlier than returning the worker
-				// Reason is that when MR finishes the phase, it will close the
-				// registerChan, so it will get dead lock since we cannot
-				// put the worker into the registerChan it it has been closed
-				wg.Done()
-				registerChan <- worker
+				// We need to create a goroutine to return the work to the
+				// registerChan, since it is unbuffered so when there are some
+				// other free works, it will block this function, so we need to
+				// create a new goroutine to wait the registerChan
+				go func() {
+					registerChan <- worker
+				}()
+				// send 1 to the channel means we have already done a task
+				workChan <- 1
 			} else {
 				// the worker is not available we need to reschdule this task
 				// number so we need to return the number to the taskNumberChan
@@ -94,7 +83,10 @@ func schedule(jobName string, mapFiles []string, nReduce int, phase jobPhase, re
 		}(jobName, i, n_other, phase)
 	}
 
-	wg.Wait()
+	// wait all the tasks to be done
+	for i := 0; i < ntasks; i++ {
+		<-workChan
+	}
 
 	fmt.Printf("Schedule: %v done\n", phase)
 }
