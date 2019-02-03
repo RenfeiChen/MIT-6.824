@@ -107,7 +107,7 @@ type Raft struct {
 	leaderChannel        chan bool     // buffered channel to know if there is already a leader
 	applyChannel         chan ApplyMsg // apply the log to the upper state machine
 
-	working bool
+	exitChannel chan bool
 }
 
 // GetState return currentTerm and whether this server
@@ -228,9 +228,6 @@ func (rf *Raft) getPrevLogTerm(serverID int) int {
 // log[lastApplied] to state machine
 func (rf *Raft) applyLogs() {
 	for rf.commitIndex > rf.lastApplied {
-		if !rf.working {
-			break
-		}
 		rf.lastApplied++
 		applyMsg := ApplyMsg{CommandIndex: rf.log[rf.lastApplied].Index, Command: rf.log[rf.lastApplied].Command, CommandValid: true}
 		rf.applyChannel <- applyMsg
@@ -246,7 +243,7 @@ func (rf *Raft) updateCommitIndex() {
 	sort.Ints(copyMatchIndex)
 
 	N := copyMatchIndex[len(rf.peers)/2]
-	if rf.working && rf.state == LEADER && N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
+	if rf.state == LEADER && N > rf.commitIndex && rf.log[N].Term == rf.currentTerm {
 		rf.commitIndex = N
 		rf.applyLogs()
 	}
@@ -271,8 +268,8 @@ func (rf *Raft) persist() {
 // restore previously persisted state.
 //
 func (rf *Raft) readPersist(data []byte) {
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if data == nil || len(data) < 1 {
 		return
 	}
@@ -315,9 +312,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// check it for all servers
 	reply.VoteGranted = false
 	reply.Term = rf.currentTerm
-	if !rf.working {
-		return
-	}
 	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
 	}
@@ -355,21 +349,16 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	// reply.Success = false
-	// need to check before handling the RPC
-	// if args.Term > rf.currentTerm {
-	// 	rf.convertToFollower(args.Term)
-	// }
 	reply.Term = rf.currentTerm
 	reply.Success = false
 	reply.ConflictTerm = 0
 	reply.ConflictIndex = 0
-	if !rf.working {
-		return
-	}
-	if args.Term >= rf.currentTerm {
-		// it has received the AppendEntries RPC, so update to FOLLOWER
+	if args.Term > rf.currentTerm {
 		rf.convertToFollower(args.Term)
+	}
+	if args.Term == rf.currentTerm {
+		// it has received the AppendEntries RPC, so update to FOLLOWER
+		rf.state = FOLLOWER
 		// notify this server has received appendEntries
 		dropAndSet(rf.appendEntriesChannel)
 		if args.PrevLogIndex > rf.getLastLogIndex() {
@@ -489,7 +478,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := rf.currentTerm
 	isLeader := rf.state == LEADER
-	if isLeader && rf.working {
+	if isLeader {
 		index = rf.getLastLogIndex() + 1
 		logEntry := LogEntry{Term: term, Index: index, Command: command}
 		rf.log = append(rf.log, logEntry)
@@ -506,20 +495,20 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	rf.working = false
+	dropAndSet(rf.exitChannel)
 }
 
 func (rf *Raft) mainControl() {
 	for {
-		rf.mu.Lock()
-		if !rf.working {
+		select {
+		case <-rf.exitChannel:
 			return
+		default:
 		}
+		electionTimeout := time.Millisecond * time.Duration(300+rand.Intn(100))
+		rf.mu.Lock()
 		state := rf.state
 		rf.mu.Unlock()
-		electionTimeout := time.Millisecond * time.Duration(300+rand.Intn(100))
 		switch state {
 		case FOLLOWER:
 			select {
@@ -591,8 +580,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.appendEntriesChannel = make(chan bool, 1)
 	rf.votesRequestsChannel = make(chan bool, 1)
 	rf.leaderChannel = make(chan bool, 1)
-
-	rf.working = true
+	rf.exitChannel = make(chan bool, 1)
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
@@ -604,11 +592,16 @@ func Make(peers []*labrpc.ClientEnd, me int,
 // startElection is called when a follower becomes a candidate
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	if rf.state != CANDIDATE || !rf.working {
+	if rf.state != CANDIDATE {
 		rf.mu.Unlock()
 		return
 	}
-	args := RequestVoteArgs{Term: rf.currentTerm, CandidateID: rf.me, LastLogIndex: rf.getLastLogIndex(), LastLogTerm: rf.getLastLogTerm()}
+	args := RequestVoteArgs{
+		Term:         rf.currentTerm,
+		CandidateID:  rf.me,
+		LastLogIndex: rf.getLastLogIndex(),
+		LastLogTerm:  rf.getLastLogTerm(),
+	}
 	rf.mu.Unlock()
 	// the number of received votes
 	var numVoted int32 = 1
@@ -628,9 +621,6 @@ func (rf *Raft) startElection() {
 				defer rf.mu.Unlock()
 				// check the term, if the CANDIDATE has stale term, it cannot
 				// be the LEADER, so just update it to FOLLOWER and return
-				if !rf.working {
-					return
-				}
 				if reply.Term > rf.currentTerm {
 					rf.convertToFollower(reply.Term)
 					return
@@ -664,13 +654,20 @@ func (rf *Raft) sendHeartbeats() {
 			for {
 				rf.mu.Lock()
 				var reply AppendEntriesReply
-				if rf.state != LEADER || !rf.working {
+				if rf.state != LEADER {
 					rf.mu.Unlock()
 					return
 				}
 				newEntries := make([]LogEntry, 0)
 				newEntries = append(newEntries, rf.log[rf.nextIndex[serverId]:]...)
-				args := AppendEntriesArgs{Term: rf.currentTerm, LeaderId: rf.me, PrevLogIndex: rf.getPrevLogIndex(serverId), PrevLogTerm: rf.getPrevLogTerm(serverId), Entries: newEntries, LeaderCommit: rf.commitIndex}
+				args := AppendEntriesArgs{
+					Term:         rf.currentTerm,
+					LeaderId:     rf.me,
+					PrevLogIndex: rf.getPrevLogIndex(serverId),
+					PrevLogTerm:  rf.getPrevLogTerm(serverId),
+					Entries:      newEntries,
+					LeaderCommit: rf.commitIndex,
+				}
 				rf.mu.Unlock()
 				if rf.sendAppendEntries(serverId, &args, &reply) {
 					rf.mu.Lock()
